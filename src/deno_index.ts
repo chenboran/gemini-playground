@@ -67,19 +67,46 @@ async function handleWebSocket(req: Request): Promise<Response> {
   return response;
 }
 
-async function handleAPIRequest(req: Request): Promise<Response> {
+async function handleGeminiProxy(req: Request): Promise<Response> {
+  const url = new URL(req.url);
+  const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
+  const targetUrl = `${GEMINI_BASE_URL}${url.pathname}${url.search}`;
+  console.log(`Proxying API request to: ${targetUrl}`);
+
+  const apiKey = req.headers.get('Authorization')?.split(' ')[1];
+
+  const geminiHeaders = new Headers(req.headers);
+  geminiHeaders.delete('Authorization');
+  if (apiKey) {
+    geminiHeaders.set('x-goog-api-key', apiKey);
+  }
+  geminiHeaders.set('host', 'generativelanguage.googleapis.com');
+
   try {
-    const worker = await import('./api_proxy/worker.mjs');
-    return await worker.default.fetch(req);
+    const geminiResponse = await fetch(targetUrl, {
+      method: req.method,
+      headers: geminiHeaders,
+      body: req.body,
+    });
+
+    const responseHeaders = new Headers(geminiResponse.headers);
+    responseHeaders.set('Access-Control-Allow-Origin', '*');
+    responseHeaders.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    responseHeaders.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-goog-api-key');
+
+    return new Response(geminiResponse.body, {
+      status: geminiResponse.status,
+      statusText: geminiResponse.statusText,
+      headers: responseHeaders,
+    });
   } catch (error) {
-    console.error('API request error:', error);
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-    const errorStatus = (error as { status?: number }).status || 500;
-    return new Response(errorMessage, {
-      status: errorStatus,
+    console.error('Error proxying request to Gemini:', error);
+    return new Response(JSON.stringify({ error: 'Proxy request failed' }), {
+      status: 500,
       headers: {
-        'content-type': 'text/plain;charset=UTF-8',
-      }
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*',
+      },
     });
   }
 }
@@ -88,18 +115,25 @@ async function handleRequest(req: Request): Promise<Response> {
   const url = new URL(req.url);
   console.log('Request URL:', req.url);
 
-  // WebSocket 处理
+  if (req.method === 'OPTIONS') {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-goog-api-key',
+      },
+    });
+  }
+
   if (req.headers.get("Upgrade")?.toLowerCase() === "websocket") {
     return handleWebSocket(req);
   }
 
-  if (url.pathname.endsWith("/chat/completions") ||
-      url.pathname.endsWith("/embeddings") ||
-      url.pathname.endsWith("/models")) {
-    return handleAPIRequest(req);
+  if (url.pathname.startsWith("/v1") || url.pathname.startsWith("/v1beta")) {
+    return handleGeminiProxy(req);
   }
 
-  // 静态文件处理
   try {
     let filePath = url.pathname;
     if (filePath === '/' || filePath === '/index.html') {
@@ -127,4 +161,4 @@ async function handleRequest(req: Request): Promise<Response> {
   }
 }
 
-Deno.serve(handleRequest); 
+Deno.serve(handleRequest);
