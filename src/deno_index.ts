@@ -67,41 +67,51 @@ async function handleWebSocket(req: Request): Promise<Response> {
   return response;
 }
 
-async function handleGeminiProxy(req: Request): Promise<Response> {
-  const url = new URL(req.url);
-  const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
-  const targetUrl = `${GEMINI_BASE_URL}${url.pathname}${url.search}`;
-  console.log(`Proxying API request to: ${targetUrl}`);
-
-  const apiKey = req.headers.get('Authorization')?.split(' ')[1];
-
-  const geminiHeaders = new Headers(req.headers);
-  geminiHeaders.delete('Authorization');
-  if (apiKey) {
-    geminiHeaders.set('x-goog-api-key', apiKey);
+async function handleAPIRequest(req: Request): Promise<Response> {
+  // Handle CORS preflight requests for the API
+  if (req.method === 'OPTIONS') {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-goog-api-key',
+      },
+    });
   }
-  geminiHeaders.set('host', 'generativelanguage.googleapis.com');
+
+  const url = new URL(req.url);
+  // The target URL for the Gemini API
+  const targetUrl = `https://generativelanguage.googleapis.com${url.pathname}${url.search}`;
+
+  // Create a new request to forward, copying method, body, and headers
+  const headers = new Headers(req.headers);
+  // The browser will set the host, we need to use the target's host
+  headers.delete('host');
+
+  const proxyReq = new Request(targetUrl, {
+    method: req.method,
+    headers: headers,
+    body: req.body,
+    redirect: 'follow',
+  });
 
   try {
-    const geminiResponse = await fetch(targetUrl, {
-      method: req.method,
-      headers: geminiHeaders,
-      body: req.body,
-    });
+    const response = await fetch(proxyReq);
 
-    const responseHeaders = new Headers(geminiResponse.headers);
+    // Create a new response to send back to the client, adding CORS headers
+    const responseHeaders = new Headers(response.headers);
     responseHeaders.set('Access-Control-Allow-Origin', '*');
-    responseHeaders.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    responseHeaders.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-goog-api-key');
-
-    return new Response(geminiResponse.body, {
-      status: geminiResponse.status,
-      statusText: geminiResponse.statusText,
+    
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
       headers: responseHeaders,
     });
   } catch (error) {
-    console.error('Error proxying request to Gemini:', error);
-    return new Response(JSON.stringify({ error: 'Proxy request failed' }), {
+    console.error('API request proxy error:', error);
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+    return new Response(JSON.stringify({ error: 'Proxy request failed', details: errorMessage }), {
       status: 500,
       headers: {
         'Content-Type': 'application/json',
@@ -115,25 +125,17 @@ async function handleRequest(req: Request): Promise<Response> {
   const url = new URL(req.url);
   console.log('Request URL:', req.url);
 
-  if (req.method === 'OPTIONS') {
-    return new Response(null, {
-      status: 204,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-goog-api-key',
-      },
-    });
-  }
-
+  // WebSocket 处理
   if (req.headers.get("Upgrade")?.toLowerCase() === "websocket") {
     return handleWebSocket(req);
   }
 
-  if (url.pathname.startsWith("/v1") || url.pathname.startsWith("/v1beta")) {
-    return handleGeminiProxy(req);
+  // 匹配 Gemini API 路径 (e.g., /v1beta/models/gemini-pro:generateContent)
+  if (url.pathname.startsWith('/v1beta/') || url.pathname.startsWith('/v1/')) {
+    return handleAPIRequest(req);
   }
 
+  // 静态文件处理
   try {
     let filePath = url.pathname;
     if (filePath === '/' || filePath === '/index.html') {
